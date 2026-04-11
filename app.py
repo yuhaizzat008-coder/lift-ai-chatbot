@@ -1,39 +1,21 @@
-import os
-import json
+ import json
 import time
 import streamlit as st
-
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
-
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-
-# =========================
-# CONFIG
-# =========================
-DB_FOLDER = "chroma_db"
-USER_FILE = "users.json"
-
-os.makedirs(DB_FOLDER, exist_ok=True)
+from duckduckgo_search import DDGS
 
 
 # =========================
 # USER SYSTEM
 # =========================
-if not os.path.exists(USER_FILE):
-    with open(USER_FILE, "w") as f:
-        json.dump({}, f)
+USER_FILE = "users.json"
 
-
-def load_users():
+try:
     with open(USER_FILE, "r") as f:
-        return json.load(f)
+        users = json.load(f)
+except:
+    users = {}
 
-
-def save_users(users):
+def save_users():
     with open(USER_FILE, "w") as f:
         json.dump(users, f)
 
@@ -44,38 +26,35 @@ if "logged_in" not in st.session_state:
 
 def login_signup():
     option = st.selectbox("Select Option", ["Login", "Sign Up"])
-    users = load_users()
 
     if option == "Login":
         st.title("🔐 Login")
-
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
 
         if st.button("Login"):
-            if username in users and users[username] == password:
+            if u in users and users[u] == p:
                 st.session_state.logged_in = True
-                st.session_state.user = username
+                st.session_state.user = u
                 st.success("Login successful")
                 st.rerun()
             else:
-                st.error("Invalid username or password")
+                st.error("Invalid login")
 
     else:
         st.title("📝 Sign Up")
-
-        new_user = st.text_input("New Username")
-        new_pass = st.text_input("New Password", type="password")
+        u = st.text_input("New Username")
+        p = st.text_input("New Password", type="password")
 
         if st.button("Create Account"):
-            if new_user in users:
-                st.warning("Username already exists")
-            elif new_user == "" or new_pass == "":
+            if u in users:
+                st.warning("User exists")
+            elif u == "" or p == "":
                 st.warning("Fill all fields")
             else:
-                users[new_user] = new_pass
-                save_users(users)
-                st.success("Account created! Please login")
+                users[u] = p
+                save_users()
+                st.success("Account created")
 
 
 if not st.session_state.logged_in:
@@ -84,139 +63,69 @@ if not st.session_state.logged_in:
 
 
 # =========================
-# VECTOR DATABASE
+# SIMPLE AI ENGINE
 # =========================
-@st.cache_resource
-def load_db():
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
-
-    return Chroma(
-        persist_directory=DB_FOLDER,
-        embedding_function=embeddings
-    )
+def web_search(query):
+    with DDGS() as ddgs:
+        results = list(ddgs.text(query, max_results=3))
+        return " ".join([r["body"] for r in results])
 
 
-vectordb = load_db()
-
-
-# =========================
-# WEB SEARCH
-# =========================
-search = DuckDuckGoSearchAPIWrapper()
-
-
-# =========================
-# AI ENGINE
-# =========================
 def ai_answer(query):
 
     q = query.lower()
 
-    # -------- RULE-BASED (ACCURATE CORE KNOWLEDGE) --------
+    # ---- RULE BASED ----
     if "overspeed governor" in q:
         return """Answer:
-- Overspeed governor monitors elevator speed and activates safety gear when speed exceeds safe limits.
+- Overspeed governor detects excessive speed and activates safety gear.
 
 Inspection Guidance:
 - Test governor regularly
-- Check safety gear operation
+- Check safety gear
 
 Safety Note:
-- Prevents dangerous overspeed accidents
+- Prevents dangerous accidents
 """
 
     if "overspeed" in q:
         return """Answer:
-- If a lift overspeeds, the overspeed governor detects it and stops the lift using safety gear.
+- If a lift overspeeds, the governor stops the lift automatically.
 
 Inspection Guidance:
-- Inspect governor and braking system
-- Ensure proper calibration
+- Inspect braking system
+- Check calibration
 
 Safety Note:
-- Prevents free fall accidents
+- Prevents free fall
 """
 
-    # -------- LOCAL PDF SEARCH --------
-    docs = vectordb.similarity_search(query, k=2)
-
-    if docs and len(docs[0].page_content) > 50:
-        return f"""Answer:
-- {docs[0].page_content[:200]}
-
-Inspection Guidance:
-- Refer to maintenance procedures
-
-Safety Note:
-- Follow safety standards
-"""
-
-    # -------- WEB SEARCH FALLBACK --------
+    # ---- WEB SEARCH ----
     try:
-        web = search.run(query)
+        web = web_search(query)
 
         return f"""Answer:
 - {web[:300]}
 
 Inspection Guidance:
-- Verify information with official standards
+- Verify from official sources
 
 Safety Note:
-- Always follow safety regulations
+- Follow safety standards
 """
-
     except:
-        return """Answer:
-- Unable to retrieve information.
-
-Inspection Guidance:
-- Check manuals or standards
-
-Safety Note:
-- Follow safety procedures
-"""
+        return "System unable to fetch data."
 
 
 # =========================
 # UI
 # =========================
 st.title("🛗 Lift Inspection AI System")
-st.sidebar.write("Logged in as:", st.session_state.user)
+st.sidebar.write("User:", st.session_state.user)
 
 
 # =========================
-# PDF UPLOAD
-# =========================
-st.sidebar.header("Upload PDF")
-
-pdf_files = st.sidebar.file_uploader(
-    "Upload PDF", type=["pdf"], accept_multiple_files=True
-)
-
-if pdf_files:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50
-    )
-
-    for file in pdf_files:
-        with open(file.name, "wb") as f:
-            f.write(file.getbuffer())
-
-        loader = PyPDFLoader(file.name)
-        docs = loader.load()
-
-        chunks = splitter.split_documents(docs)
-        vectordb.add_documents(chunks)
-
-    vectordb.persist()
-    st.sidebar.success("PDF added successfully!")
-
-
-# =========================
-# CHAT MEMORY
+# CHAT
 # =========================
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -226,10 +135,7 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 
-# =========================
-# CHAT INPUT
-# =========================
-query = st.chat_input("Ask about lift maintenance or inspection...")
+query = st.chat_input("Ask about lift maintenance...")
 
 if query:
 
@@ -241,7 +147,6 @@ if query:
     answer = ai_answer(query)
 
     with st.chat_message("assistant"):
-
         placeholder = st.empty()
         text = ""
 
