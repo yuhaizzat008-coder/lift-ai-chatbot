@@ -1,160 +1,132 @@
- import json
-import time
 import streamlit as st
-from duckduckgo_search import DDGS
+import os
 
+from langchain.vectorstores import FAISS
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.chat_models import ChatOpenAI
+from langchain.chains import RetrievalQA
 
-# =========================
-# USER SYSTEM
-# =========================
-USER_FILE = "users.json"
+# -------------------------------
+# PAGE CONFIG
+# -------------------------------
+st.set_page_config(page_title="Lift Safety Assistant", layout="wide")
 
-try:
-    with open(USER_FILE, "r") as f:
-        users = json.load(f)
-except:
-    users = {}
+st.title("🛗 Lift Safety Assistant")
+st.markdown("AI-powered safety guidance for lift maintenance and inspection")
 
-def save_users():
-    with open(USER_FILE, "w") as f:
-        json.dump(users, f)
+# -------------------------------
+# SAFETY DISCLAIMER
+# -------------------------------
+st.warning("⚠️ This system provides guidance only. Always follow certified safety procedures.")
 
-
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-
-def login_signup():
-    option = st.selectbox("Select Option", ["Login", "Sign Up"])
-
-    if option == "Login":
-        st.title("🔐 Login")
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-
-        if st.button("Login"):
-            if u in users and users[u] == p:
-                st.session_state.logged_in = True
-                st.session_state.user = u
-                st.success("Login successful")
-                st.rerun()
-            else:
-                st.error("Invalid login")
-
-    else:
-        st.title("📝 Sign Up")
-        u = st.text_input("New Username")
-        p = st.text_input("New Password", type="password")
-
-        if st.button("Create Account"):
-            if u in users:
-                st.warning("User exists")
-            elif u == "" or p == "":
-                st.warning("Fill all fields")
-            else:
-                users[u] = p
-                save_users()
-                st.success("Account created")
-
-
-if not st.session_state.logged_in:
-    login_signup()
+# -------------------------------
+# OPENAI API KEY
+# -------------------------------
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+else:
+    st.error("OpenAI API key not found. Add it in Streamlit secrets.")
     st.stop()
 
+# -------------------------------
+# LOAD EMBEDDINGS
+# -------------------------------
+@st.cache_resource
+def load_embeddings():
+    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# =========================
-# SIMPLE AI ENGINE
-# =========================
-def web_search(query):
-    with DDGS() as ddgs:
-        results = list(ddgs.text(query, max_results=3))
-        return " ".join([r["body"] for r in results])
-
-
-def ai_answer(query):
-
-    q = query.lower()
-
-    # ---- RULE BASED ----
-    if "overspeed governor" in q:
-        return """Answer:
-- Overspeed governor detects excessive speed and activates safety gear.
-
-Inspection Guidance:
-- Test governor regularly
-- Check safety gear
-
-Safety Note:
-- Prevents dangerous accidents
-"""
-
-    if "overspeed" in q:
-        return """Answer:
-- If a lift overspeeds, the governor stops the lift automatically.
-
-Inspection Guidance:
-- Inspect braking system
-- Check calibration
-
-Safety Note:
-- Prevents free fall
-"""
-
-    # ---- WEB SEARCH ----
+# -------------------------------
+# LOAD VECTOR DATABASE
+# -------------------------------
+@st.cache_resource
+def load_vectorstore():
+    embeddings = load_embeddings()
     try:
-        web = web_search(query)
-
-        return f"""Answer:
-- {web[:300]}
-
-Inspection Guidance:
-- Verify from official sources
-
-Safety Note:
-- Follow safety standards
-"""
+        db = FAISS.load_local("vectorstore", embeddings)
+        return db
     except:
-        return "System unable to fetch data."
+        st.error("Vector database not found. Ensure 'vectorstore' folder exists.")
+        return None
 
+# -------------------------------
+# LOAD OPENAI MODEL
+# -------------------------------
+@st.cache_resource
+def load_llm():
+    return ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.2
+    )
 
-# =========================
-# UI
-# =========================
-st.title("🛗 Lift Inspection AI System")
-st.sidebar.write("User:", st.session_state.user)
+# -------------------------------
+# BUILD RAG SYSTEM
+# -------------------------------
+@st.cache_resource
+def build_qa():
+    db = load_vectorstore()
+    if db is None:
+        return None
 
+    llm = load_llm()
 
-# =========================
-# CHAT
-# =========================
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    qa = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=db.as_retriever(search_kwargs={"k": 4}),
+        return_source_documents=True
+    )
+    return qa
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+qa_system = build_qa()
 
+# -------------------------------
+# SAFETY RESPONSE FORMAT
+# -------------------------------
+def format_response(answer):
+    checklist = (
+        "SAFETY CHECKLIST:\n"
+        "- Isolate power supply\n"
+        "- Apply lockout/tagout (LOTO)\n"
+        "- Wear PPE (helmet, gloves, harness)\n"
+        "- Secure working area\n"
+    )
 
-query = st.chat_input("Ask about lift maintenance...")
+    warning = (
+        "⚠️ WARNING: Ensure lift is fully isolated before inspection.\n"
+        "⚠️ WARNING: Ensure lift is fully isolated before inspection.\n"
+    )
+
+    return f"{checklist}\n\n{warning}\n\nTECHNICAL GUIDANCE:\n{answer}"
+
+# -------------------------------
+# USER INPUT
+# -------------------------------
+query = st.text_input("Enter your lift safety question:")
 
 if query:
+    if qa_system is None:
+        st.error("System not ready. Missing vector database.")
+    else:
+        with st.spinner("Processing safety query..."):
+            result = qa_system(query)
 
-    st.session_state.messages.append({"role": "user", "content": query})
+            answer = result["result"]
+            sources = result["source_documents"]
 
-    with st.chat_message("user"):
-        st.markdown(query)
+            formatted = format_response(answer)
 
-    answer = ai_answer(query)
+            st.markdown("### 🧠 Response")
+            st.text(formatted)
 
-    with st.chat_message("assistant"):
-        placeholder = st.empty()
-        text = ""
+            # -------------------------------
+            # SHOW SOURCES (TRACEABILITY)
+            # -------------------------------
+            with st.expander("📄 Retrieved Safety References"):
+                for i, doc in enumerate(sources):
+                    st.write(f"Source {i+1}:")
+                    st.write(doc.page_content[:300])
 
-        for word in answer.split():
-            text += word + " "
-            placeholder.markdown(text + "▌")
-            time.sleep(0.02)
-
-        placeholder.markdown(text)
-
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+# -------------------------------
+# FOOTER
+# -------------------------------
+st.markdown("---")
+st.caption("Lift Safety AI Assistant | RAG + OpenAI Powered")
