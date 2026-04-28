@@ -1,132 +1,141 @@
-import streamlit as st
-import os
-
-from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.chat_models import ChatOpenAI
+       import streamlit as st
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.llms import CTransformers
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.document_loaders import TextLoader
 from langchain.chains import RetrievalQA
 
-# -------------------------------
+# =========================
 # PAGE CONFIG
-# -------------------------------
-st.set_page_config(page_title="Lift Safety Assistant", layout="wide")
+# =========================
+st.set_page_config(page_title="Lift Safety Assistant", page_icon="🛗", layout="wide")
 
-st.title("🛗 Lift Safety Assistant")
-st.markdown("AI-powered safety guidance for lift maintenance and inspection")
+# =========================
+# SESSION STATE (CHAT MEMORY)
+# =========================
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-# -------------------------------
-# SAFETY DISCLAIMER
-# -------------------------------
-st.warning("⚠️ This system provides guidance only. Always follow certified safety procedures.")
+# =========================
+# SIDEBAR (RESET BUTTON)
+# =========================
+with st.sidebar:
+    st.header("⚙️ Controls")
 
-# -------------------------------
-# OPENAI API KEY
-# -------------------------------
-if "OPENAI_API_KEY" in st.secrets:
-    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
-else:
-    st.error("OpenAI API key not found. Add it in Streamlit secrets.")
-    st.stop()
+    if st.button("🔄 Reset Chat"):
+        st.session_state.chat_history = []
+        st.rerun()
 
-# -------------------------------
-# LOAD EMBEDDINGS
-# -------------------------------
-@st.cache_resource
-def load_embeddings():
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    st.markdown("---")
+    st.subheader("📌 Example Questions")
+    st.write("• What is lockout-tagout?")
+    st.write("• Lift emergency procedure")
+    st.write("• Electrical safety in lifts")
 
-# -------------------------------
-# LOAD VECTOR DATABASE
-# -------------------------------
-@st.cache_resource
-def load_vectorstore():
-    embeddings = load_embeddings()
-    try:
-        db = FAISS.load_local("vectorstore", embeddings)
-        return db
-    except:
-        st.error("Vector database not found. Ensure 'vectorstore' folder exists.")
-        return None
+# =========================
+# SYSTEM PROMPT
+# =========================
+SYSTEM_PROMPT = """
+You are a certified lift safety inspector.
 
-# -------------------------------
-# LOAD OPENAI MODEL
-# -------------------------------
+Respond using STRICT structure:
+1. Safety Checklist
+2. Critical Warning (repeat twice)
+3. Technical Steps
+4. Diagnostic Questions
+
+Rules:
+- Keep sentences SHORT
+- Be DIRECT and COMMANDING
+- No polite phrases
+- No extra explanation
+"""
+
+# =========================
+# LOAD MODEL (CACHED)
+# =========================
 @st.cache_resource
 def load_llm():
-    return ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.2
+    return CTransformers(
+        model="TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+        model_type="llama",
+        config={
+            'max_new_tokens': 180,
+            'temperature': 0.2
+        }
     )
 
-# -------------------------------
-# BUILD RAG SYSTEM
-# -------------------------------
+# =========================
+# LOAD VECTOR DATABASE (CACHED)
+# =========================
 @st.cache_resource
-def build_qa():
-    db = load_vectorstore()
-    if db is None:
-        return None
+def load_vectorstore():
+    loader = TextLoader("data.txt")
+    documents = loader.load()
 
-    llm = load_llm()
+    splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    docs = splitter.split_documents(documents)
 
-    qa = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=db.as_retriever(search_kwargs={"k": 4}),
-        return_source_documents=True
-    )
-    return qa
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    db = FAISS.from_documents(docs, embeddings)
 
-qa_system = build_qa()
+    return db
 
-# -------------------------------
-# SAFETY RESPONSE FORMAT
-# -------------------------------
-def format_response(answer):
-    checklist = (
-        "SAFETY CHECKLIST:\n"
-        "- Isolate power supply\n"
-        "- Apply lockout/tagout (LOTO)\n"
-        "- Wear PPE (helmet, gloves, harness)\n"
-        "- Secure working area\n"
-    )
+# =========================
+# INITIALIZE SYSTEM
+# =========================
+llm = load_llm()
+vectorstore = load_vectorstore()
 
-    warning = (
-        "⚠️ WARNING: Ensure lift is fully isolated before inspection.\n"
-        "⚠️ WARNING: Ensure lift is fully isolated before inspection.\n"
-    )
+qa = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
+    return_source_documents=True
+)
 
-    return f"{checklist}\n\n{warning}\n\nTECHNICAL GUIDANCE:\n{answer}"
+# =========================
+# HEADER
+# =========================
+st.title("🛗 Lift Safety AI Assistant")
+st.caption("Real-time safety guidance based on ISO / EN / ASME standards")
 
-# -------------------------------
+# =========================
+# DISPLAY CHAT HISTORY
+# =========================
+for chat in st.session_state.chat_history:
+    with st.chat_message(chat["role"]):
+        st.write(chat["content"])
+
+# =========================
 # USER INPUT
-# -------------------------------
-query = st.text_input("Enter your lift safety question:")
+# =========================
+query = st.chat_input("Ask your safety question...")
 
 if query:
-    if qa_system is None:
-        st.error("System not ready. Missing vector database.")
-    else:
-        with st.spinner("Processing safety query..."):
-            result = qa_system(query)
+    # Show user message
+    st.session_state.chat_history.append({"role": "user", "content": query})
+    with st.chat_message("user"):
+        st.write(query)
 
-            answer = result["result"]
-            sources = result["source_documents"]
+    # Generate response
+    with st.chat_message("assistant"):
+        with st.spinner("Analyzing safety procedure..."):
+            result = qa({"query": SYSTEM_PROMPT + "\n" + query})
 
-            formatted = format_response(answer)
+            response = result["result"]
+            st.write(response)
 
-            st.markdown("### 🧠 Response")
-            st.text(formatted)
+            # SOURCE DISPLAY
+            with st.expander("📄 Source Reference"):
+                for doc in result["source_documents"]:
+                    st.write(doc.page_content)
 
-            # -------------------------------
-            # SHOW SOURCES (TRACEABILITY)
-            # -------------------------------
-            with st.expander("📄 Retrieved Safety References"):
-                for i, doc in enumerate(sources):
-                    st.write(f"Source {i+1}:")
-                    st.write(doc.page_content[:300])
+    # Save assistant response
+    st.session_state.chat_history.append({"role": "assistant", "content": response})
 
-# -------------------------------
+# =========================
 # FOOTER
-# -------------------------------
+# =========================
 st.markdown("---")
-st.caption("Lift Safety AI Assistant | RAG + OpenAI Powered")
+st.caption("⚠️ Safety guidance only. Verify with official standards before real-world use.")
